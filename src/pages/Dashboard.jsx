@@ -34,6 +34,18 @@ export default function Dashboard() {
     setLoading(false)
   }
 
+  const deleteProject = async (e, project) => {
+    e.stopPropagation() // prevent navigating into the project
+    if (!confirm(`Delete "${project.name}"? This will soft-delete it. You can contact support to recover it within 30 days.`)) return
+    const { error } = await supabase
+      .from('projects')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', project.id)
+      .eq('owner_id', user.id)
+    if (error) { alert('Could not delete — you may not be the owner.'); return }
+    loadProjects()
+  }
+
   return (
     <div>
       <header className="app-header">
@@ -64,9 +76,21 @@ export default function Dashboard() {
           <div className="dashboard-grid">
             {projects.map((p) => {
               const total = (p.expenses || []).reduce((s, e) => s + Number(e.amount), 0)
+              const isOwner = p.owner_id === user.id
               return (
                 <div key={p.id} className="project-card" onClick={() => navigate(`/project/${p.id}`)}>
-                  <h3>{p.name}</h3>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                    <h3>{p.name}</h3>
+                    {isOwner && (
+                      <button
+                        onClick={(e) => deleteProject(e, p)}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text3)', padding: '0 0 0 8px', lineHeight: 1 }}
+                        title="Delete project"
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </div>
                   <div className="meta">{p.description || 'No description'}</div>
                   <div className="stat-row">
                     <span>{(p.project_members || []).length} member{(p.project_members || []).length !== 1 ? 's' : ''}</span>
