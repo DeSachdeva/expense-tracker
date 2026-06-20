@@ -1,18 +1,97 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { formatCurrency } from '../lib/balances'
 import { supabase } from '../lib/supabase'
+
+// ── Drag state lives entirely in refs — no async state issues ──
+function useDragToReorder(getItems, onDone) {
+  const dragging = useRef(null)  // { id, groupKey, startY, currentIndex }
+  const positions = useRef({})   // id -> { top, height, el }
+  const [overIndex, setOverIndex] = useState(null)
+  const [draggingId, setDraggingId] = useState(null)
+
+  const registerEl = useCallback((id, el) => {
+    if (el) positions.current[id] = el
+    else delete positions.current[id]
+  }, [])
+
+  const onMouseDown = useCallback((e, id, groupKey) => {
+    // Only trigger on the handle (left mouse button)
+    if (e.button !== 0) return
+    e.preventDefault()
+    dragging.current = { id, groupKey, startY: e.clientY }
+    setDraggingId(id)
+    setOverIndex(null)
+  }, [])
+
+  useEffect(() => {
+    const onMouseMove = (e) => {
+      if (!dragging.current) return
+      const { id, groupKey } = dragging.current
+      const items = getItems(groupKey)
+      if (!items) return
+
+      const currentY = e.clientY
+      let targetIndex = null
+
+      items.forEach((item, idx) => {
+        const el = positions.current[item.id]
+        if (!el) return
+        const rect = el.getBoundingClientRect()
+        const midY = rect.top + rect.height / 2
+        if (currentY < midY && targetIndex === null) {
+          targetIndex = idx
+        }
+      })
+      if (targetIndex === null) targetIndex = items.length - 1
+
+      // find current index of dragging item
+      const fromIdx = items.findIndex((x) => x.id === id)
+      if (targetIndex !== fromIdx) {
+        setOverIndex(targetIndex)
+      }
+    }
+
+    const onMouseUp = async (e) => {
+      if (!dragging.current) return
+      const { id, groupKey } = dragging.current
+      const items = getItems(groupKey)
+      dragging.current = null
+      setDraggingId(null)
+
+      if (!items || overIndex === null) { setOverIndex(null); return }
+
+      const fromIdx = items.findIndex((x) => x.id === id)
+      if (fromIdx === -1 || overIndex === fromIdx) { setOverIndex(null); return }
+
+      const reordered = [...items]
+      const [moved] = reordered.splice(fromIdx, 1)
+      reordered.splice(overIndex, 0, moved)
+      setOverIndex(null)
+
+      await Promise.all(
+        reordered.map((item, idx) =>
+          supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
+        )
+      )
+      onDone()
+    }
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+  }, [overIndex, getItems, onDone])
+
+  return { onMouseDown, registerEl, draggingId, overIndex }
+}
 
 export default function ExpenseList({ project, expenses, members, memberMap, categories, paymentModes, onEdit, onDeleted, onReordered }) {
   const [filterCat, setFilterCat] = useState('')
   const [filterMode, setFilterMode] = useState('')
   const [filterPerson, setFilterPerson] = useState('')
   const [sortBy, setSortBy] = useState('default')
-  const [dragState, setDragState] = useState({ draggingId: null, dragOverId: null })
-
-  // Use refs for the actual logic — state is only for visual feedback
-  const draggingIdRef = useRef(null)
-  const dragOverIdRef = useRef(null)
-  const groupsRef = useRef({})
 
   const catMap = Object.fromEntries(categories.map((c) => [c.id, c]))
   const modeMap = Object.fromEntries(paymentModes.map((m) => [m.id, m]))
@@ -27,101 +106,36 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
   if (sortBy === 'amount_desc') filtered = [...filtered].sort((a, b) => b.amount - a.amount)
   if (sortBy === 'amount_asc') filtered = [...filtered].sort((a, b) => a.amount - b.amount)
 
-  // Group by day label + date combo
+  // Group
   const groups = {}
   const groupOrder = []
   filtered.forEach((e) => {
     const datePart = e.expense_date
       ? new Date(e.expense_date + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
       : null
-    const key = e.day_label && datePart
-      ? `${e.day_label} — ${datePart}`
+    const key = e.day_label && datePart ? `${e.day_label} — ${datePart}`
       : e.day_label || datePart || 'Other'
     if (!groups[key]) { groups[key] = []; groupOrder.push(key) }
     groups[key].push(e)
   })
-  // Keep a ref copy for use inside drop handler (avoids stale closure)
-  groupsRef.current = groups
 
-  const handleDragStart = (ev, id) => {
-    draggingIdRef.current = id
-    dragOverIdRef.current = null
-    ev.dataTransfer.effectAllowed = 'move'
-    ev.dataTransfer.setData('text/plain', id)
-    setDragState({ draggingId: id, dragOverId: null })
-  }
-
-  const handleDragEnter = (ev, id) => {
-    ev.preventDefault()
-    if (id === draggingIdRef.current) return
-    dragOverIdRef.current = id
-    setDragState((s) => ({ ...s, dragOverId: id }))
-  }
-
-  const handleDragOver = (ev) => {
-    ev.preventDefault()
-    ev.dataTransfer.dropEffect = 'move'
-  }
-
-  const handleDrop = async (ev, groupKey) => {
-    ev.preventDefault()
-
-    const fromId = draggingIdRef.current
-    const toId = dragOverIdRef.current
-
-    // Reset visual state immediately
-    draggingIdRef.current = null
-    dragOverIdRef.current = null
-    setDragState({ draggingId: null, dragOverId: null })
-
-    if (!fromId || !toId || fromId === toId) return
-
-    const items = groupsRef.current[groupKey]
-    if (!items) return
-
-    const fromIdx = items.findIndex((x) => x.id === fromId)
-    const toIdx = items.findIndex((x) => x.id === toId)
-
-    if (fromIdx === -1 || toIdx === -1) return
-
-    // Build new order
-    const reordered = [...items]
-    const [moved] = reordered.splice(fromIdx, 1)
-    reordered.splice(toIdx, 0, moved)
-
-    // Save to DB
-    await Promise.all(
-      reordered.map((item, idx) =>
-        supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
-      )
-    )
-    onReordered()
-  }
-
-  const handleDragEnd = () => {
-    // Only clear visuals — don't touch refs here, drop may not have fired yet on some browsers
-    // Small delay to let onDrop finish first
-    setTimeout(() => {
-      draggingIdRef.current = null
-      dragOverIdRef.current = null
-      setDragState({ draggingId: null, dragOverId: null })
-    }, 50)
-  }
+  const getItems = useCallback((groupKey) => groups[groupKey], [filtered])
+  const { onMouseDown, registerEl, draggingId, overIndex } = useDragToReorder(getItems, onReordered)
 
   const exportCSV = () => {
     if (expenses.length === 0) return
-    const header = ['Day', 'Date', 'Time', 'Description', 'Category', `Amount (${project.currency})`, 'Paid By', 'Payment Mode', 'Split Among', 'Each Person Pays', 'Notes']
+    const header = ['Day','Date','Time','Description','Category',`Amount (${project.currency})`,'Paid By','Payment Mode','Split Among','Each Person Pays','Notes']
     const rows = expenses.map((e) => [
-      e.day_label || '', e.expense_date || '', e.expense_time || '',
-      e.description, catMap[e.category_id]?.name || '', e.amount,
-      memberMap[e.paid_by]?.display_name || '', modeMap[e.payment_mode_id]?.name || '',
+      e.day_label||'', e.expense_date||'', e.expense_time||'',
+      e.description, catMap[e.category_id]?.name||'', e.amount,
+      memberMap[e.paid_by]?.display_name||'', modeMap[e.payment_mode_id]?.name||'',
       e.split_among.map((id) => memberMap[id]?.display_name).join(' + '),
-      (e.amount / e.split_among.length).toFixed(2), e.notes || '',
+      (e.amount/e.split_among.length).toFixed(2), e.notes||'',
     ])
-    const csv = [header, ...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n')
+    const csv = [header,...rows].map((r) => r.map((v) => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n')
     const a = document.createElement('a')
     a.href = 'data:text/csv;charset=utf-8,\uFEFF' + encodeURIComponent(csv)
-    a.download = `${project.name.replace(/\s+/g, '_')}_expenses.csv`
+    a.download = `${project.name.replace(/\s+/g,'_')}_expenses.csv`
     a.click()
   }
 
@@ -150,7 +164,7 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
 
       {sortBy === 'default' && (
         <p style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12 }}>
-          💡 Drag the ⠿ handle to reorder expenses within a day group
+          💡 Hold ⠿ and drag to reorder within a day group
         </p>
       )}
 
@@ -164,37 +178,34 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
           const exps = groups[groupKey]
           const groupTotal = exps.reduce((s, e) => s + Number(e.amount), 0)
           return (
-            <div
-              key={groupKey}
-              className="day-group"
-              onDragOver={handleDragOver}
-              onDrop={(ev) => handleDrop(ev, groupKey)}
-            >
+            <div key={groupKey} className="day-group">
               <div className="day-label">{groupKey}</div>
-              {exps.map((e) => {
-                const isDragging = dragState.draggingId === e.id
-                const isOver = dragState.dragOverId === e.id
+              {exps.map((e, idx) => {
+                const isDragging = draggingId === e.id
+                const isTarget = draggingId && draggingId !== e.id && overIndex === idx
                 return (
                   <div
                     key={e.id}
+                    ref={(el) => registerEl(e.id, el)}
                     className="expense-card"
-                    draggable={sortBy === 'default'}
-                    onDragStart={(ev) => handleDragStart(ev, e.id)}
-                    onDragEnter={(ev) => handleDragEnter(ev, e.id)}
-                    onDragEnd={handleDragEnd}
                     style={{
-                      opacity: isDragging ? 0.3 : 1,
-                      border: isOver ? '2px solid var(--accent)' : undefined,
-                      transform: isOver ? 'scale(1.01)' : undefined,
-                      transition: 'opacity 0.1s, transform 0.1s',
+                      opacity: isDragging ? 0.35 : 1,
+                      borderTop: isTarget ? '3px solid var(--accent)' : undefined,
+                      transition: 'opacity 0.1s',
+                      userSelect: 'none',
                     }}
                   >
                     <div className="expense-main">
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         {sortBy === 'default' && (
                           <span
-                            style={{ color: 'var(--text3)', fontSize: 18, cursor: 'grab', userSelect: 'none', flexShrink: 0 }}
-                            title="Drag to reorder"
+                            onMouseDown={(ev) => onMouseDown(ev, e.id, groupKey)}
+                            style={{
+                              color: 'var(--text3)', fontSize: 18,
+                              cursor: draggingId ? 'grabbing' : 'grab',
+                              userSelect: 'none', flexShrink: 0, padding: '2px 4px'
+                            }}
+                            title="Hold and drag to reorder"
                           >⠿</span>
                         )}
                         <div className="expense-desc">{e.description}</div>
