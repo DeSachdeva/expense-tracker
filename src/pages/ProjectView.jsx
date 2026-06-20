@@ -137,6 +137,7 @@ export default function ProjectView() {
             categories={categories}
             paymentModes={paymentModes}
             onEdit={(exp) => { setEditingExpense(exp); setActiveTab('add') }}
+            onReordered={loadAll}
             onDeleted={async (exp) => {
               const { error } = await supabase.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', exp.id)
               if (!error) {

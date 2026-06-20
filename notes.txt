@@ -1,0 +1,10 @@
+Add features:
+    merge day and date;
+    reorder the expenses;
+    optional time feature;
+    pasting date is allowed in date section;
+    date can be permanent until changed;
+    dates can be asked while setting up the project and can be merged with the days in a drop down list;
+    the form can retain a few fields like payment method, date, and if other, because when adding entries for the same day it might be tough to keep adding same details each and everytime;
+    
+    

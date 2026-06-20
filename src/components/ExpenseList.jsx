@@ -1,10 +1,14 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { formatCurrency } from '../lib/balances'
+import { supabase } from '../lib/supabase'
 
-export default function ExpenseList({ project, expenses, members, memberMap, categories, paymentModes, onEdit, onDeleted }) {
+export default function ExpenseList({ project, expenses, members, memberMap, categories, paymentModes, onEdit, onDeleted, onReordered }) {
   const [filterCat, setFilterCat] = useState('')
   const [filterMode, setFilterMode] = useState('')
   const [filterPerson, setFilterPerson] = useState('')
+  const [sortBy, setSortBy] = useState('default') // default | amount_asc | amount_desc
+  const dragItem = useRef(null)
+  const dragOverItem = useRef(null)
 
   const catMap = Object.fromEntries(categories.map((c) => [c.id, c]))
   const modeMap = Object.fromEntries(paymentModes.map((m) => [m.id, m]))
@@ -16,19 +20,57 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
     return true
   })
 
-  // group by day_label if present, else by date, else "Other"
+  if (sortBy === 'amount_desc') filtered = [...filtered].sort((a, b) => b.amount - a.amount)
+  if (sortBy === 'amount_asc') filtered = [...filtered].sort((a, b) => a.amount - b.amount)
+
+  // Group by day label + date combo
   const groups = {}
+  const groupOrder = []
   filtered.forEach((e) => {
-    const key = e.day_label || (e.expense_date ? new Date(e.expense_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Other')
-    if (!groups[key]) groups[key] = []
-    groups[key].push(e)
+    const datePart = e.expense_date
+      ? new Date(e.expense_date + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+      : null
+    const timePart = e.expense_time ? ` · ${e.expense_time}` : ''
+    const key = e.day_label && datePart
+      ? `${e.day_label} — ${datePart}`
+      : e.day_label
+      ? e.day_label
+      : datePart
+      ? datePart
+      : 'Other'
+    if (!groups[key]) { groups[key] = []; groupOrder.push(key) }
+    groups[key].push({ ...e, _timePart: timePart })
   })
+
+  // Drag and drop within a group
+  const handleDragStart = (groupKey, index) => { dragItem.current = { groupKey, index } }
+  const handleDragEnter = (groupKey, index) => { dragOverItem.current = { groupKey, index } }
+  const handleDrop = async (e) => {
+    e.preventDefault()
+    if (!dragItem.current || !dragOverItem.current) return
+    if (dragItem.current.groupKey !== dragOverItem.current.groupKey) return
+    if (dragItem.current.index === dragOverItem.current.index) return
+
+    const groupKey = dragItem.current.groupKey
+    const items = [...groups[groupKey]]
+    const dragged = items.splice(dragItem.current.index, 1)[0]
+    items.splice(dragOverItem.current.index, 0, dragged)
+
+    // Persist new sort_order values
+    await Promise.all(items.map((item, idx) =>
+      supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
+    ))
+    dragItem.current = null
+    dragOverItem.current = null
+    onReordered()
+  }
 
   const exportCSV = () => {
     if (expenses.length === 0) return
-    const header = ['Day', 'Date', 'Description', 'Category', `Amount (${project.currency})`, 'Paid By', 'Payment Mode', 'Split Among', 'Each Person Pays', 'Notes']
+    const header = ['Day', 'Date', 'Time', 'Description', 'Category', `Amount (${project.currency})`, 'Paid By', 'Payment Mode', 'Split Among', 'Each Person Pays', 'Notes']
     const rows = expenses.map((e) => [
-      e.day_label || '', e.expense_date || '', e.description, catMap[e.category_id]?.name || '', e.amount,
+      e.day_label || '', e.expense_date || '', e.expense_time || '',
+      e.description, catMap[e.category_id]?.name || '', e.amount,
       memberMap[e.paid_by]?.display_name || '', modeMap[e.payment_mode_id]?.name || '',
       e.split_among.map((id) => memberMap[id]?.display_name).join(' + '),
       (e.amount / e.split_among.length).toFixed(2), e.notes || '',
@@ -55,24 +97,49 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
           <option value="">All people</option>
           {members.map((m) => <option key={m.id} value={m.id}>{m.display_name}</option>)}
         </select>
-        <button className="btn btn-secondary" onClick={exportCSV}>⬇️ Export CSV</button>
+        <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+          <option value="default">Sort: default</option>
+          <option value="amount_desc">Sort: highest first</option>
+          <option value="amount_asc">Sort: lowest first</option>
+        </select>
+        <button className="btn btn-secondary" onClick={exportCSV}>⬇️ CSV</button>
       </div>
 
-      {Object.keys(groups).length === 0 ? (
+      {sortBy === 'default' && (
+        <p style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12 }}>
+          💡 Drag the ⠿ handle to reorder expenses within a day group
+        </p>
+      )}
+
+      {groupOrder.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">🧾</div>
           <p>{expenses.length === 0 ? 'No expenses yet. Add your first one!' : 'No expenses match the filters.'}</p>
         </div>
       ) : (
-        Object.entries(groups).map(([groupKey, exps]) => {
+        groupOrder.map((groupKey) => {
+          const exps = groups[groupKey]
           const groupTotal = exps.reduce((s, e) => s + Number(e.amount), 0)
           return (
             <div key={groupKey} className="day-group">
               <div className="day-label">{groupKey}</div>
-              {exps.map((e) => (
-                <div key={e.id} className="expense-card">
+              {exps.map((e, idx) => (
+                <div
+                  key={e.id}
+                  className="expense-card"
+                  draggable={sortBy === 'default'}
+                  onDragStart={() => handleDragStart(groupKey, idx)}
+                  onDragEnter={() => handleDragEnter(groupKey, idx)}
+                  onDragEnd={handleDrop}
+                  onDragOver={(ev) => ev.preventDefault()}
+                  style={{ cursor: sortBy === 'default' ? 'grab' : 'default' }}
+                >
                   <div className="expense-main">
-                    <div className="expense-desc">{e.description}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {sortBy === 'default' && <span style={{ color: 'var(--text3)', fontSize: 16, cursor: 'grab', userSelect: 'none' }} title="Drag to reorder">⠿</span>}
+                      <div className="expense-desc">{e.description}</div>
+                      {e._timePart && <span style={{ fontSize: 11, color: 'var(--text3)' }}>🕐{e._timePart}</span>}
+                    </div>
                     <div className="expense-meta">
                       <span className="badge badge-cat">{catMap[e.category_id]?.name}</span>
                       <span className="badge badge-mode">{modeMap[e.payment_mode_id]?.name}</span>
@@ -82,13 +149,12 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
                       Split among: {e.split_among.map((id) => memberMap[id]?.display_name).join(', ')} · Each: {formatCurrency(e.amount / e.split_among.length, project.currency)}
                     </div>
                     {e.notes && <div className="expense-notes">{e.notes}</div>}
-                    {e.day_label && e.expense_date && <div className="expense-notes">📅 {e.expense_date}</div>}
                   </div>
                   <div className="expense-right">
                     <div className="expense-amount">{formatCurrency(e.amount, project.currency)}</div>
                     <div className="expense-actions">
-                      <button className="btn-ghost btn-sm" onClick={() => onEdit(e)}>✏️ Edit</button>
-                      <button className="btn-danger" onClick={() => { if (confirm('Move this expense to trash?')) onDeleted(e) }}>🗑</button>
+                      <button className="btn-ghost btn-sm" onClick={() => onEdit(e)}>✏️</button>
+                      <button className="btn-danger" onClick={() => { if (confirm('Move to trash?')) onDeleted(e) }}>🗑</button>
                     </div>
                   </div>
                 </div>

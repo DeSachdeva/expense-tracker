@@ -35,8 +35,8 @@ export default function Dashboard() {
   }
 
   const deleteProject = async (e, project) => {
-    e.stopPropagation() // prevent navigating into the project
-    if (!confirm(`Delete "${project.name}"? This will soft-delete it. You can contact support to recover it within 30 days.`)) return
+    e.stopPropagation()
+    if (!confirm(`Delete "${project.name}"? It will be soft-deleted and recoverable for 30 days.`)) return
     const { error } = await supabase
       .from('projects')
       .update({ deleted_at: new Date().toISOString() })
@@ -77,21 +77,26 @@ export default function Dashboard() {
             {projects.map((p) => {
               const total = (p.expenses || []).reduce((s, e) => s + Number(e.amount), 0)
               const isOwner = p.owner_id === user.id
+              const dateRange = p.start_date && p.num_days
+                ? (() => {
+                    const start = new Date(p.start_date + 'T00:00:00')
+                    const end = new Date(start)
+                    end.setDate(start.getDate() + p.num_days - 1)
+                    return `${start.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })} – ${end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}`
+                  })()
+                : null
               return (
                 <div key={p.id} className="project-card" onClick={() => navigate(`/project/${p.id}`)}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                     <h3>{p.name}</h3>
                     {isOwner && (
-                      <button
-                        onClick={(e) => deleteProject(e, p)}
+                      <button onClick={(e) => deleteProject(e, p)}
                         style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text3)', padding: '0 0 0 8px', lineHeight: 1 }}
-                        title="Delete project"
-                      >
-                        🗑
-                      </button>
+                        title="Delete project">🗑</button>
                     )}
                   </div>
                   <div className="meta">{p.description || 'No description'}</div>
+                  {dateRange && <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>📅 {dateRange}</div>}
                   <div className="stat-row">
                     <span>{(p.project_members || []).length} member{(p.project_members || []).length !== 1 ? 's' : ''}</span>
                     <strong>{p.currency === 'INR' ? '₹' : p.currency} {Math.round(total).toLocaleString('en-IN')}</strong>
@@ -118,8 +123,19 @@ function NewProjectModal({ onClose, onCreated }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [currency, setCurrency] = useState('INR')
+  const [startDate, setStartDate] = useState('')
+  const [numDays, setNumDays] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+
+  // Preview the date range
+  const datePreview = (() => {
+    if (!startDate || !numDays || numDays < 1) return null
+    const start = new Date(startDate + 'T00:00:00')
+    const end = new Date(start)
+    end.setDate(start.getDate() + Number(numDays) - 1)
+    return `Day 1 (${start.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}) → Day ${numDays} (${end.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })})`
+  })()
 
   const handleCreate = async (e) => {
     e.preventDefault()
@@ -128,7 +144,14 @@ function NewProjectModal({ onClose, onCreated }) {
     setError('')
     const { data, error } = await supabase
       .from('projects')
-      .insert({ name: name.trim(), description: description.trim() || null, currency, owner_id: user.id })
+      .insert({
+        name: name.trim(),
+        description: description.trim() || null,
+        currency,
+        owner_id: user.id,
+        start_date: startDate || null,
+        num_days: numDays ? parseInt(numDays) : null,
+      })
       .select()
       .single()
     setBusy(false)
@@ -159,6 +182,29 @@ function NewProjectModal({ onClose, onCreated }) {
               <option value="GBP">£ GBP — British Pound</option>
             </select>
           </div>
+
+          <div style={{ borderTop: '1px solid var(--border)', margin: '16px 0', paddingTop: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text2)', marginBottom: 12, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Trip dates (optional)</div>
+            <div className="form-grid">
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Start date</label>
+                <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              </div>
+              <div className="field" style={{ marginBottom: 0 }}>
+                <label>Number of days</label>
+                <input type="number" min="1" max="365" value={numDays} onChange={(e) => setNumDays(e.target.value)} placeholder="e.g. 10" />
+              </div>
+            </div>
+            {datePreview && (
+              <div style={{ fontSize: 12, color: 'var(--green)', background: 'var(--green-bg)', border: '1px solid #86efac', borderRadius: 6, padding: '8px 12px', marginTop: 10 }}>
+                📅 {datePreview}
+              </div>
+            )}
+            <p style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8 }}>
+              If set, the expense form will show a combined "Day 1 — 15 Jun" dropdown. You can skip this and enter days manually instead.
+            </p>
+          </div>
+
           {error && <div className="error-text">{error}</div>}
           <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
             <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
