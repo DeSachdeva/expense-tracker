@@ -6,9 +6,10 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
   const [filterCat, setFilterCat] = useState('')
   const [filterMode, setFilterMode] = useState('')
   const [filterPerson, setFilterPerson] = useState('')
-  const [sortBy, setSortBy] = useState('default') // default | amount_asc | amount_desc
-  const dragItem = useRef(null)
-  const dragOverItem = useRef(null)
+  const [sortBy, setSortBy] = useState('default')
+  const [draggingId, setDraggingId] = useState(null)
+  const [dragOverId, setDragOverId] = useState(null)
+  const groupsRef = useRef({})
 
   const catMap = Object.fromEntries(categories.map((c) => [c.id, c]))
   const modeMap = Object.fromEntries(paymentModes.map((m) => [m.id, m]))
@@ -30,39 +31,69 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
     const datePart = e.expense_date
       ? new Date(e.expense_date + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
       : null
-    const timePart = e.expense_time ? ` · ${e.expense_time}` : ''
     const key = e.day_label && datePart
       ? `${e.day_label} — ${datePart}`
-      : e.day_label
-      ? e.day_label
-      : datePart
-      ? datePart
-      : 'Other'
+      : e.day_label || datePart || 'Other'
     if (!groups[key]) { groups[key] = []; groupOrder.push(key) }
-    groups[key].push({ ...e, _timePart: timePart })
+    groups[key].push(e)
   })
+  groupsRef.current = groups
 
-  // Drag and drop within a group
-  const handleDragStart = (groupKey, index) => { dragItem.current = { groupKey, index } }
-  const handleDragEnter = (groupKey, index) => { dragOverItem.current = { groupKey, index } }
-  const handleDrop = async (e) => {
+  const handleDragStart = (e, id) => {
+    setDraggingId(id)
+    e.dataTransfer.effectAllowed = 'move'
+    // store id so we can access it in dragenter
+    e.dataTransfer.setData('text/plain', id)
+  }
+
+  const handleDragEnter = (e, id) => {
     e.preventDefault()
-    if (!dragItem.current || !dragOverItem.current) return
-    if (dragItem.current.groupKey !== dragOverItem.current.groupKey) return
-    if (dragItem.current.index === dragOverItem.current.index) return
+    if (id !== draggingId) setDragOverId(id)
+  }
 
-    const groupKey = dragItem.current.groupKey
-    const items = [...groups[groupKey]]
-    const dragged = items.splice(dragItem.current.index, 1)[0]
-    items.splice(dragOverItem.current.index, 0, dragged)
+  const handleDragOver = (e) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+  }
 
-    // Persist new sort_order values
-    await Promise.all(items.map((item, idx) =>
-      supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
-    ))
-    dragItem.current = null
-    dragOverItem.current = null
+  const handleDrop = async (e, groupKey) => {
+    e.preventDefault()
+    if (!draggingId || !dragOverId || draggingId === dragOverId) {
+      setDraggingId(null)
+      setDragOverId(null)
+      return
+    }
+
+    const items = [...groupsRef.current[groupKey]]
+    const fromIdx = items.findIndex((x) => x.id === draggingId)
+    const toIdx = items.findIndex((x) => x.id === dragOverId)
+
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggingId(null)
+      setDragOverId(null)
+      return
+    }
+
+    // Reorder in place
+    const reordered = [...items]
+    const [moved] = reordered.splice(fromIdx, 1)
+    reordered.splice(toIdx, 0, moved)
+
+    setDraggingId(null)
+    setDragOverId(null)
+
+    // Persist sort_order for every item in this group
+    await Promise.all(
+      reordered.map((item, idx) =>
+        supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
+      )
+    )
     onReordered()
+  }
+
+  const handleDragEnd = () => {
+    setDraggingId(null)
+    setDragOverId(null)
   }
 
   const exportCSV = () => {
@@ -99,8 +130,8 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
         </select>
         <select className="filter-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
           <option value="default">Sort: default</option>
-          <option value="amount_desc">Sort: highest first</option>
-          <option value="amount_asc">Sort: lowest first</option>
+          <option value="amount_desc">Highest first</option>
+          <option value="amount_asc">Lowest first</option>
         </select>
         <button className="btn btn-secondary" onClick={exportCSV}>⬇️ CSV</button>
       </div>
@@ -121,44 +152,64 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
           const exps = groups[groupKey]
           const groupTotal = exps.reduce((s, e) => s + Number(e.amount), 0)
           return (
-            <div key={groupKey} className="day-group">
+            <div
+              key={groupKey}
+              className="day-group"
+              onDrop={(e) => handleDrop(e, groupKey)}
+              onDragOver={handleDragOver}
+            >
               <div className="day-label">{groupKey}</div>
-              {exps.map((e, idx) => (
-                <div
-                  key={e.id}
-                  className="expense-card"
-                  draggable={sortBy === 'default'}
-                  onDragStart={() => handleDragStart(groupKey, idx)}
-                  onDragEnter={() => handleDragEnter(groupKey, idx)}
-                  onDragEnd={handleDrop}
-                  onDragOver={(ev) => ev.preventDefault()}
-                  style={{ cursor: sortBy === 'default' ? 'grab' : 'default' }}
-                >
-                  <div className="expense-main">
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {sortBy === 'default' && <span style={{ color: 'var(--text3)', fontSize: 16, cursor: 'grab', userSelect: 'none' }} title="Drag to reorder">⠿</span>}
-                      <div className="expense-desc">{e.description}</div>
-                      {e._timePart && <span style={{ fontSize: 11, color: 'var(--text3)' }}>🕐{e._timePart}</span>}
+              {exps.map((e) => {
+                const isDragging = draggingId === e.id
+                const isOver = dragOverId === e.id
+                return (
+                  <div
+                    key={e.id}
+                    className="expense-card"
+                    draggable={sortBy === 'default'}
+                    onDragStart={(ev) => handleDragStart(ev, e.id)}
+                    onDragEnter={(ev) => handleDragEnter(ev, e.id)}
+                    onDragEnd={handleDragEnd}
+                    style={{
+                      opacity: isDragging ? 0.4 : 1,
+                      borderColor: isOver ? 'var(--accent)' : undefined,
+                      borderWidth: isOver ? 2 : undefined,
+                      transition: 'opacity 0.15s, border-color 0.15s',
+                    }}
+                  >
+                    <div className="expense-main">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        {sortBy === 'default' && (
+                          <span
+                            style={{ color: 'var(--text3)', fontSize: 18, cursor: 'grab', userSelect: 'none', flexShrink: 0 }}
+                            title="Drag to reorder"
+                          >⠿</span>
+                        )}
+                        <div className="expense-desc">{e.description}</div>
+                        {e.expense_time && (
+                          <span style={{ fontSize: 11, color: 'var(--text3)', whiteSpace: 'nowrap' }}>🕐 {e.expense_time}</span>
+                        )}
+                      </div>
+                      <div className="expense-meta">
+                        <span className="badge badge-cat">{catMap[e.category_id]?.name}</span>
+                        <span className="badge badge-mode">{modeMap[e.payment_mode_id]?.name}</span>
+                        <span className="badge badge-paid">Paid by {memberMap[e.paid_by]?.display_name}</span>
+                      </div>
+                      <div className="expense-split">
+                        Split among: {e.split_among.map((id) => memberMap[id]?.display_name).join(', ')} · Each: {formatCurrency(e.amount / e.split_among.length, project.currency)}
+                      </div>
+                      {e.notes && <div className="expense-notes">{e.notes}</div>}
                     </div>
-                    <div className="expense-meta">
-                      <span className="badge badge-cat">{catMap[e.category_id]?.name}</span>
-                      <span className="badge badge-mode">{modeMap[e.payment_mode_id]?.name}</span>
-                      <span className="badge badge-paid">Paid by {memberMap[e.paid_by]?.display_name}</span>
+                    <div className="expense-right">
+                      <div className="expense-amount">{formatCurrency(e.amount, project.currency)}</div>
+                      <div className="expense-actions">
+                        <button className="btn-ghost btn-sm" onClick={() => onEdit(e)}>✏️</button>
+                        <button className="btn-danger" onClick={() => { if (confirm('Move to trash?')) onDeleted(e) }}>🗑</button>
+                      </div>
                     </div>
-                    <div className="expense-split">
-                      Split among: {e.split_among.map((id) => memberMap[id]?.display_name).join(', ')} · Each: {formatCurrency(e.amount / e.split_among.length, project.currency)}
-                    </div>
-                    {e.notes && <div className="expense-notes">{e.notes}</div>}
                   </div>
-                  <div className="expense-right">
-                    <div className="expense-amount">{formatCurrency(e.amount, project.currency)}</div>
-                    <div className="expense-actions">
-                      <button className="btn-ghost btn-sm" onClick={() => onEdit(e)}>✏️</button>
-                      <button className="btn-danger" onClick={() => { if (confirm('Move to trash?')) onDeleted(e) }}>🗑</button>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
               <div className="day-total">Group total: {formatCurrency(groupTotal, project.currency)}</div>
             </div>
           )
