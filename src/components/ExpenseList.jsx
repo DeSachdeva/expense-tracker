@@ -7,8 +7,11 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
   const [filterMode, setFilterMode] = useState('')
   const [filterPerson, setFilterPerson] = useState('')
   const [sortBy, setSortBy] = useState('default')
-  const [draggingId, setDraggingId] = useState(null)
-  const [dragOverId, setDragOverId] = useState(null)
+  const [dragState, setDragState] = useState({ draggingId: null, dragOverId: null })
+
+  // Use refs for the actual logic — state is only for visual feedback
+  const draggingIdRef = useRef(null)
+  const dragOverIdRef = useRef(null)
   const groupsRef = useRef({})
 
   const catMap = Object.fromEntries(categories.map((c) => [c.id, c]))
@@ -37,52 +40,56 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
     if (!groups[key]) { groups[key] = []; groupOrder.push(key) }
     groups[key].push(e)
   })
+  // Keep a ref copy for use inside drop handler (avoids stale closure)
   groupsRef.current = groups
 
-  const handleDragStart = (e, id) => {
-    setDraggingId(id)
-    e.dataTransfer.effectAllowed = 'move'
-    // store id so we can access it in dragenter
-    e.dataTransfer.setData('text/plain', id)
+  const handleDragStart = (ev, id) => {
+    draggingIdRef.current = id
+    dragOverIdRef.current = null
+    ev.dataTransfer.effectAllowed = 'move'
+    ev.dataTransfer.setData('text/plain', id)
+    setDragState({ draggingId: id, dragOverId: null })
   }
 
-  const handleDragEnter = (e, id) => {
-    e.preventDefault()
-    if (id !== draggingId) setDragOverId(id)
+  const handleDragEnter = (ev, id) => {
+    ev.preventDefault()
+    if (id === draggingIdRef.current) return
+    dragOverIdRef.current = id
+    setDragState((s) => ({ ...s, dragOverId: id }))
   }
 
-  const handleDragOver = (e) => {
-    e.preventDefault()
-    e.dataTransfer.dropEffect = 'move'
+  const handleDragOver = (ev) => {
+    ev.preventDefault()
+    ev.dataTransfer.dropEffect = 'move'
   }
 
-  const handleDrop = async (e, groupKey) => {
-    e.preventDefault()
-    if (!draggingId || !dragOverId || draggingId === dragOverId) {
-      setDraggingId(null)
-      setDragOverId(null)
-      return
-    }
+  const handleDrop = async (ev, groupKey) => {
+    ev.preventDefault()
 
-    const items = [...groupsRef.current[groupKey]]
-    const fromIdx = items.findIndex((x) => x.id === draggingId)
-    const toIdx = items.findIndex((x) => x.id === dragOverId)
+    const fromId = draggingIdRef.current
+    const toId = dragOverIdRef.current
 
-    if (fromIdx === -1 || toIdx === -1) {
-      setDraggingId(null)
-      setDragOverId(null)
-      return
-    }
+    // Reset visual state immediately
+    draggingIdRef.current = null
+    dragOverIdRef.current = null
+    setDragState({ draggingId: null, dragOverId: null })
 
-    // Reorder in place
+    if (!fromId || !toId || fromId === toId) return
+
+    const items = groupsRef.current[groupKey]
+    if (!items) return
+
+    const fromIdx = items.findIndex((x) => x.id === fromId)
+    const toIdx = items.findIndex((x) => x.id === toId)
+
+    if (fromIdx === -1 || toIdx === -1) return
+
+    // Build new order
     const reordered = [...items]
     const [moved] = reordered.splice(fromIdx, 1)
     reordered.splice(toIdx, 0, moved)
 
-    setDraggingId(null)
-    setDragOverId(null)
-
-    // Persist sort_order for every item in this group
+    // Save to DB
     await Promise.all(
       reordered.map((item, idx) =>
         supabase.from('expenses').update({ sort_order: idx }).eq('id', item.id)
@@ -92,8 +99,13 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
   }
 
   const handleDragEnd = () => {
-    setDraggingId(null)
-    setDragOverId(null)
+    // Only clear visuals — don't touch refs here, drop may not have fired yet on some browsers
+    // Small delay to let onDrop finish first
+    setTimeout(() => {
+      draggingIdRef.current = null
+      dragOverIdRef.current = null
+      setDragState({ draggingId: null, dragOverId: null })
+    }, 50)
   }
 
   const exportCSV = () => {
@@ -155,13 +167,13 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
             <div
               key={groupKey}
               className="day-group"
-              onDrop={(e) => handleDrop(e, groupKey)}
               onDragOver={handleDragOver}
+              onDrop={(ev) => handleDrop(ev, groupKey)}
             >
               <div className="day-label">{groupKey}</div>
               {exps.map((e) => {
-                const isDragging = draggingId === e.id
-                const isOver = dragOverId === e.id
+                const isDragging = dragState.draggingId === e.id
+                const isOver = dragState.dragOverId === e.id
                 return (
                   <div
                     key={e.id}
@@ -171,10 +183,10 @@ export default function ExpenseList({ project, expenses, members, memberMap, cat
                     onDragEnter={(ev) => handleDragEnter(ev, e.id)}
                     onDragEnd={handleDragEnd}
                     style={{
-                      opacity: isDragging ? 0.4 : 1,
-                      borderColor: isOver ? 'var(--accent)' : undefined,
-                      borderWidth: isOver ? 2 : undefined,
-                      transition: 'opacity 0.15s, border-color 0.15s',
+                      opacity: isDragging ? 0.3 : 1,
+                      border: isOver ? '2px solid var(--accent)' : undefined,
+                      transform: isOver ? 'scale(1.01)' : undefined,
+                      transition: 'opacity 0.1s, transform 0.1s',
                     }}
                   >
                     <div className="expense-main">
