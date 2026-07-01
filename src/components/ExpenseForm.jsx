@@ -161,7 +161,7 @@ export default function ExpenseForm({
     let expense_date = null
     let day_label = null
 
-    if (isCustomDay || form.day_key === 'custom') {
+    if (isCustomDay || form.day_key === 'custom' || dayOptions.length <= 1) {
       expense_date = form.custom_date || null
       day_label = form.custom_day_label.trim() || null
     } else if (form.day_key) {
@@ -256,37 +256,43 @@ export default function ExpenseForm({
           </div>
         </div>
 
-        {/* Day selector */}
-        <div className="form-grid" style={{ marginBottom: 4 }}>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>Day *</label>
-            {dayOptions.length > 1 ? (
+        {/* Day selector — only show dropdown when trip dates are configured */}
+        {dayOptions.length > 1 && (
+          <div className="form-grid" style={{ marginBottom: 4 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Day *</label>
               <select value={form.day_key} onChange={(e) => handleDayKeyChange(e.target.value)}>
                 <option value="">Select day</option>
                 {dayOptions.map((o) => <option key={o.value} value={o.value}>{o.display}</option>)}
               </select>
-            ) : (
-              // No trip dates set — show manual inputs
-              <input value={form.custom_day_label} onChange={(e) => setForm({ ...form, custom_day_label: e.target.value })} placeholder="e.g. Day 3" />
-            )}
+            </div>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Time (optional)</label>
+              <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} />
+            </div>
           </div>
-          <div className="field" style={{ marginBottom: 0 }}>
-            <label>Time (optional)</label>
-            <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} />
-          </div>
-        </div>
+        )}
 
-        {/* Custom date inputs (shown when "custom" is selected) */}
+        {/* Custom date inputs (shown when "custom" is selected or no trip dates configured) */}
         {(isCustomDay || dayOptions.length === 1) && (
           <div className="form-grid" style={{ marginBottom: 14, marginTop: 10 }}>
             <div className="field" style={{ marginBottom: 0 }}>
-              <label>Date</label>
+              <label>Date *</label>
               <input type="date" value={form.custom_date} onChange={(e) => setForm({ ...form, custom_date: e.target.value })} />
             </div>
             <div className="field" style={{ marginBottom: 0 }}>
               <label>Day label (optional)</label>
               <input value={form.custom_day_label} onChange={(e) => setForm({ ...form, custom_day_label: e.target.value })} placeholder="e.g. Day 3" />
             </div>
+          </div>
+        )}
+        {dayOptions.length === 1 && (
+          <div className="form-grid" style={{ marginBottom: 14 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Time (optional)</label>
+              <input type="time" value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} />
+            </div>
+            <div />
           </div>
         )}
         {!isCustomDay && dayOptions.length > 1 && <div style={{ marginBottom: 14 }} />}
